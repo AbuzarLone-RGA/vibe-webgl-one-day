@@ -24,16 +24,9 @@ const fragmentShader = /* glsl */ `
   varying float vIntensity;
 
   void main() {
-    vec2  uv   = gl_PointCoord * 2.0 - 1.0;
-    float dist = length(uv);
-    if (dist > 1.0) discard;
-
-    float body = 1.0 - smoothstep(0.72, 1.0, dist);
-    float rim  = smoothstep(0.50, 0.85, dist) * smoothstep(1.0, 0.85, dist) * 0.9;
-    float core = (1.0 - smoothstep(0.0, 0.35, dist)) * 0.8;
-
-    float alpha = clamp(body + rim + core, 0.0, 1.0);
-    gl_FragColor = vec4(1.0, 1.0, 1.0, alpha * vIntensity);
+    vec2 uv = gl_PointCoord * 2.0 - 1.0;
+    if (length(uv) > 0.85) discard;
+    gl_FragColor = vec4(1.0, 1.0, 1.0, vIntensity);
   }
 `
 
@@ -74,8 +67,8 @@ function sampleImage(img: HTMLImageElement): ParticleBuffers {
       const wy =  (0.5 - py / h) * WORLD_SIZE
 
       posArr.push(wx, wy, 0)
-      sizeArr.push(0.18 + t * 0.18)   // range 0.18 – 0.36
-      intArr.push(t)
+      sizeArr.push(0.42)
+      intArr.push(0.85 + t * 0.15)
     }
   }
 
@@ -121,7 +114,7 @@ export default function BeeParticles() {
     fragmentShader,
     transparent: true,
     depthWrite:  false,
-    blending:    THREE.AdditiveBlending,
+    blending:    THREE.NormalBlending,
   })
   materialRef.current = material
 

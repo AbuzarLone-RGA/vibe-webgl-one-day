@@ -5,9 +5,12 @@ import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { ParticleData } from '@/lib/generateParticles'
 
-const SPRING_STRENGTH    = 0.018  // weaker spring → particles wander further
-const DAMPING            = 0.88   // higher damping → coast longer before stopping
-const BEAT_STRENGTH      = 0.45   // much stronger impulse on each beat
+const SPRING_STRENGTH = 0.022  // pull back to rest position
+const DAMPING         = 0.88   // velocity decay per frame
+const LIFT_STRENGTH   = 0.14   // upward kick proportional to frequency amplitude
+const BEAT_STRENGTH   = 0.30   // all-particles upward burst on beat
+const X_MIN           = -18    // particle cloud X range (from generateParticles)
+const X_MAX           =  18
 
 const vertexShader = /* glsl */ `
   attribute float size;
@@ -84,13 +87,6 @@ export default function AudioParticleSystem({ data, dataRef, analyserRef }: Prop
   const velocities    = useRef(new Float32Array(data.count * 3))
   const prevBass      = useRef(0)
 
-  // Per-particle random wander angles — each particle gets its own unique direction
-  const wanderAngles = useMemo(() => {
-    const angles = new Float32Array(data.count)
-    for (let i = 0; i < data.count; i++) angles[i] = Math.random() * Math.PI * 2
-    return angles
-  }, [data.count])
-
   const material = useMemo(
     () =>
       new THREE.ShaderMaterial({
@@ -129,27 +125,28 @@ export default function AudioParticleSystem({ data, dataRef, analyserRef }: Prop
     material.uniforms.uTime.value += delta
 
     // Read frequency data from analyser if available
-    let bass = 0, mid = 0, high = 0
     const analyser = analyserRef.current
     if (analyser && dataRef.current) {
       analyser.getByteFrequencyData(dataRef.current)
-      const freq = dataRef.current
-
-      let bassSum = 0, midSum = 0, highSum = 0
-      for (let b = 0;  b < 6;   b++) bassSum += freq[b]
-      for (let b = 6;  b < 41;  b++) midSum  += freq[b]
-      for (let b = 41; b < 101; b++) highSum += freq[b]
-
-      bass = (bassSum / 6)   / 255
-      mid  = (midSum  / 35)  / 255
-      high = (highSum / 60)  / 255
     }
+
+    const freq = dataRef.current
+
+    // Compute band averages for shader uniforms
+    let bass = 0, mid = 0, high = 0
+    let bassSum = 0, midSum = 0, highSum = 0
+    for (let b = 0;  b < 6;   b++) bassSum += freq[b]
+    for (let b = 6;  b < 41;  b++) midSum  += freq[b]
+    for (let b = 41; b < 101; b++) highSum += freq[b]
+    bass = (bassSum / 6)   / 255
+    mid  = (midSum  / 35)  / 255
+    high = (highSum / 60)  / 255
 
     material.uniforms.uBass.value = bass
     material.uniforms.uMid.value  = mid
     material.uniforms.uHigh.value = high
 
-    // Beat detection — radial impulse on bass spike
+    // Beat detection — bass spike
     const beatFired = bass - prevBass.current > 0.06
     prevBass.current = bass
 
@@ -161,28 +158,33 @@ export default function AudioParticleSystem({ data, dataRef, analyserRef }: Prop
     for (let i = 0; i < n; i++) {
       const i3 = i * 3
 
-      const px = pos[i3]
-      const py = pos[i3 + 1]
+      // Map this particle's base X position into the musically active spectrum.
+      // Bins above ~70 (>6kHz) are almost always silent in music, so spreading
+      // across all 256 bins leaves most particles unresponsive. Cap at 70 bins.
+      const t = Math.min(1, Math.max(0, (base[i3] - X_MIN) / (X_MAX - X_MIN)))
+      const binIndex = Math.floor(t * 70)
+      const columnAmp = freq[binIndex] / 255
+      // Every particle also gets a bass floor so nothing is ever completely silent
+      const freqAmp = columnAmp * 0.5 + bass * 0.5
 
-      // Beat impulse — strong radial kick from origin on each beat
+      // Particles far from camera appear smaller on screen — compensate so all
+      // particles have roughly equal apparent movement regardless of depth.
+      // Camera is at Z=5; cloud center is at Z≈-8 (distance 13).
+      const zDist = Math.max(1, 5 - base[i3 + 2])
+      const perspScale = zDist / 13
+
+      // Upward impulse proportional to how loud that frequency is
+      vel[i3 + 1] += freqAmp * LIFT_STRENGTH * perspScale
+
+      // Beat: everyone gets a sharp upward burst
       if (beatFired) {
-        const bd = Math.sqrt(px * px + py * py) || 1
-        vel[i3]     += (px / bd) * BEAT_STRENGTH
-        vel[i3 + 1] += (py / bd) * BEAT_STRENGTH
+        vel[i3 + 1] += BEAT_STRENGTH * perspScale
       }
 
-      // Each particle pushed in its own random direction, scaled by overall audio energy
-      const audioEnergy = bass * 0.6 + mid * 0.3 + high * 0.1
-      const angle = wanderAngles[i]
-      vel[i3]     += Math.cos(angle) * audioEnergy * 0.09
-      vel[i3 + 1] += Math.sin(angle) * audioEnergy * 0.09
-
-      // Slowly rotate each particle's wander angle so directions keep shifting
-      wanderAngles[i] += (0.3 + (i % 7) * 0.05) * delta
-
-      // Spring back to rest
-      vel[i3]     += (base[i3]     - px) * SPRING_STRENGTH
-      vel[i3 + 1] += (base[i3 + 1] - py) * SPRING_STRENGTH
+      // Spring back to rest position — unscaled so deep particles travel further in
+      // world space, which compensates for perspective making them appear smaller
+      vel[i3]     += (base[i3]     - pos[i3])     * SPRING_STRENGTH
+      vel[i3 + 1] += (base[i3 + 1] - pos[i3 + 1]) * SPRING_STRENGTH
 
       vel[i3]     *= DAMPING
       vel[i3 + 1] *= DAMPING
